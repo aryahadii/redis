@@ -1644,6 +1644,7 @@ int RM_ZsetAddFlagsToCoreFlags(int flags) {
     int retflags = 0;
     if (flags & REDISMODULE_ZADD_XX) retflags |= ZADD_XX;
     if (flags & REDISMODULE_ZADD_NX) retflags |= ZADD_NX;
+    if (flags & REDISMODULE_ZADD_AVL) retflags |= ZADD_AVL;
     return retflags;
 }
 

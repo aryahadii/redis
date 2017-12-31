@@ -214,6 +214,17 @@ robj *createHashObject(void) {
     return o;
 }
 
+robj *createZsetAVLObject(void) {
+    zset *zs = zmalloc(sizeof(*zs));
+    robj *o;
+
+    zs->dict = dictCreate(&zsetDictType, NULL);
+    zs->avl = zatCreate();
+    o = createObject(OBJ_ZSET, zs);
+    o->encoding = OBJ_ENCODING_AVLTREE;
+    return o;
+}
+
 robj *createZsetObject(void) {
     zset *zs = zmalloc(sizeof(*zs));
     robj *o;

@@ -908,7 +908,7 @@ struct commandHelp {
     7,
     "2.2.0" },
     { "ZADD",
-    "key [NX|XX] [CH] [INCR] score member [score member ...]",
+    "key [NX|XX] [CH] [AVL] [INCR] score member [score member ...]",
     "Add one or more members to a sorted set, or update its score if it already exists",
     4,
     "1.2.0" },
