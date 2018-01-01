@@ -777,7 +777,7 @@ int zatDelete(zavltree *zat, double score, sds ele, zavltreeNode **node) {
         if (!successor) successor = current->rChild;
         
         if (!successor) {
-            if (parentsCount > 0) {
+            if (parentsCount > 1) {
                 trashNode = current;
                 if (parents[parentsCount - 2]->lChild == current) {
                     parents[parentsCount - 2]->lChild = NULL;
@@ -798,7 +798,7 @@ int zatDelete(zavltree *zat, double score, sds ele, zavltreeNode **node) {
                 }
             } else {
                 trashNode = zat->root;
-                zat->root = NULL;
+                zat->root = successor;
             }
         }
     } else {
@@ -918,6 +918,33 @@ void zatGetElementsInRange(zavltree *avl, unsigned long startRank,
         }
     }
     zfree(nodesStack);
+}
+
+unsigned long zatGetRank(zavltree *avl, double score, sds ele) {
+    zavltreeNode **nodesStack = zmalloc(avl->length * sizeof(*nodesStack));
+    zavltreeNode *current = avl->root;
+    unsigned long rank = 0;
+    int idxStack = 0;
+
+    while (idxStack >= 0) {
+        if (current != NULL) {
+            nodesStack[idxStack++] = current;
+            current = current->lChild;
+        } else {
+            if (idxStack > 0) {
+                current = nodesStack[--idxStack];
+                rank++;
+                if (current->score == score && sdscmp(ele, current->ele) == 0) {
+                    break;
+                }
+                current = current->rChild;
+            } else {
+                break;
+            }
+        }
+    }
+    zfree(nodesStack);
+    return rank;
 }
 
 unsigned int zatGetNodeHeight(zavltreeNode *node) {
@@ -1796,16 +1823,20 @@ long zsetRank(robj *zobj, sds ele, int reverse) {
         } else {
             return -1;
         }
-    } else if (zobj->encoding == OBJ_ENCODING_SKIPLIST) {
+    } else if (zobj->encoding == OBJ_ENCODING_SKIPLIST ||
+            zobj->encoding == OBJ_ENCODING_AVLTREE) {
         zset *zs = zobj->ptr;
-        zskiplist *zsl = zs->zsl;
         dictEntry *de;
         double score;
 
         de = dictFind(zs->dict,ele);
         if (de != NULL) {
             score = *(double*)dictGetVal(de);
-            rank = zslGetRank(zsl,score,ele);
+            if (zobj->encoding == OBJ_ENCODING_AVLTREE) {
+                rank = zatGetRank(zs->avl, score, ele);
+            } else {
+                rank = zslGetRank(zs->zsl, score, ele);
+            }
             /* Existing elements always have a rank. */
             serverAssert(rank != 0);
             if (reverse)
