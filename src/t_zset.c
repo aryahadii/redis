@@ -750,6 +750,7 @@ int zatDelete(zavltree *zat, double score, sds ele, zavltreeNode **node) {
         return 0; /* not found */
     }
     
+    zavltreeNode *trashNode = zmalloc(sizeof(zavltreeNode));
     int maxLevels = zat->length / 2 + 1;
     int parentsCount = 0;
     zavltreeNode **parents = zmalloc(maxLevels * sizeof(*parents));
@@ -777,36 +778,41 @@ int zatDelete(zavltree *zat, double score, sds ele, zavltreeNode **node) {
         
         if (!successor) {
             if (parentsCount > 0) {
-                *node = current;
+                trashNode = current;
                 if (parents[parentsCount - 2]->lChild == current) {
                     parents[parentsCount - 2]->lChild = NULL;
                 } else {
                     parents[parentsCount - 2]->rChild = NULL;
                 }
             } else {
-                *node = zat->root;
+                trashNode = zat->root;
                 zat->root = NULL;
             }
         } else {
             if (parentsCount > 1) {
-                *node = current;
+                trashNode = current;
                 if (parents[parentsCount - 2]->lChild == current) {
                     parents[parentsCount - 2]->lChild = successor;
                 } else {
                     parents[parentsCount - 2]->rChild = successor;
                 }
             } else {
-                *node = zat->root;
+                trashNode = zat->root;
                 zat->root = NULL;
             }
         }
     } else {
         zavltreeNode *minValueParentNode = findMinValueParent(current->rChild);
         if (!minValueParentNode) {
-            *node = zat->root;
-            zat->root = NULL;
+            // trashNode = zat->root;
+            // zat->root = NULL;
+            trashNode = current->rChild;
+            /* Change current value to it's successor */
+            current->ele = sdsdup(current->rChild->ele);
+            current->score = current->rChild->score;
+            current->rChild = current->rChild->rChild;
         } else {
-            *node = zatCreateNode(current->score, current->ele);
+            trashNode = zatCreateNode(current->score, current->ele);
             /* Change current value to it's successor */
             current->ele = sdsdup(minValueParentNode->lChild->ele);
             current->score = minValueParentNode->lChild->score;
@@ -833,6 +839,11 @@ int zatDelete(zavltree *zat, double score, sds ele, zavltreeNode **node) {
     zat->root = zatRebalance(zat->root);
 
     zfree(parents);
+    if (node == NULL) {
+        zatFreeNode(trashNode);
+    } else {
+        *node = trashNode;
+    }
     return 1;
 }
 
@@ -1707,25 +1718,31 @@ int zsetDel(robj *zobj, sds ele) {
             zobj->ptr = zzlDelete(zobj->ptr,eptr);
             return 1;
         }
-    } else if (zobj->encoding == OBJ_ENCODING_SKIPLIST) {
+    } else if (zobj->encoding == OBJ_ENCODING_SKIPLIST || 
+            zobj->encoding == OBJ_ENCODING_AVLTREE) {
         zset *zs = zobj->ptr;
         dictEntry *de;
         double score;
 
         de = dictUnlink(zs->dict,ele);
         if (de != NULL) {
-            /* Get the score in order to delete from the skiplist later. */
+            /* Get the score in order to delete from the sset later. */
             score = *(double*)dictGetVal(de);
 
-            /* Delete from the hash table and later from the skiplist.
-             * Note that the order is important: deleting from the skiplist
+            /* Delete from the hash table and later from the sset.
+             * Note that the order is important: deleting from the sset
              * actually releases the SDS string representing the element,
-             * which is shared between the skiplist and the hash table, so
-             * we need to delete from the skiplist as the final step. */
+             * which is shared between the sset and the hash table, so
+             * we need to delete from the sset as the final step. */
             dictFreeUnlinkedEntry(zs->dict,de);
 
-            /* Delete from skiplist. */
-            int retval = zslDelete(zs->zsl,score,ele,NULL);
+            /* Delete from sset. */
+            int retval;
+            if (zobj->encoding == OBJ_ENCODING_AVLTREE) {
+                retval = zatDelete(zs->avl,score,ele,NULL);
+            } else {
+                retval = zslDelete(zs->zsl,score,ele,NULL);
+            }
             serverAssert(retval);
 
             if (htNeedsResize(zs->dict)) dictResize(zs->dict);
