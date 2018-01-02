@@ -78,8 +78,9 @@
 #define RDB_TYPE_ZSET   3
 #define RDB_TYPE_HASH   4
 #define RDB_TYPE_ZSET_2 5 /* ZSET version 2 with doubles stored in binary. */
-#define RDB_TYPE_MODULE 6
-#define RDB_TYPE_MODULE_2 7 /* Module value with annotations for parsing without
+#define RDB_TYPE_ZSET_3 6 /* ZSET version 2 with doubles stored in binary. */
+#define RDB_TYPE_MODULE 7
+#define RDB_TYPE_MODULE_2 8 /* Module value with annotations for parsing without
                                the generating module being loaded. */
 /* NOTE: WHEN ADDING NEW RDB TYPE, UPDATE rdbIsObjectType() BELOW */
 

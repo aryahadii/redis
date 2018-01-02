@@ -1641,6 +1641,7 @@ int zatHeightDiff(zavltreeNode *node);
 zavltreeNode *zatRightRotate(zavltreeNode *node);
 zavltreeNode *zatLeftRotate(zavltreeNode *node);
 zavltreeNode *zatRebalance(zavltreeNode *node);
+zavltreeNode* zatGetElementByRank(zavltree *avl, unsigned long rank);
 
 /* Core functions */
 int freeMemoryIfNeeded(void);

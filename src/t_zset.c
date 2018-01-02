@@ -891,21 +891,21 @@ zavltreeNode* zatGetElementByRank(zavltree *avl, unsigned long rank) {
     unsigned long traversed = 1;
 
     while (idx >= 0) {
-       if (current != NULL) {
-           nodesStack[idx++] = current;
-           current = current->lChild;
-       } else {
-           if (idx > 0) {
-               current = nodesStack[idx--];
-               if (++traversed == rank) {
-                   zfree(nodesStack);
-                   return current;
-               }
-               current = current->rChild;
-           } else {
-               break;
-           }
-       }
+        if (current != NULL) {
+            nodesStack[idx++] = current;
+            current = current->lChild;
+        } else {
+            if (idx > 0) {
+                current = nodesStack[--idx];
+                if (traversed++ == rank) {
+                    zfree(nodesStack);
+                    return current;
+                }
+                current = current->rChild;
+            } else {
+                break;
+            }
+        }
     }
 
     zfree(nodesStack);
