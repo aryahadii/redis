@@ -685,6 +685,29 @@ zavltree *zatCreate(void) {
     return zat;
 }
 
+void zatFree(zavltree *zat) {
+    zavltreeNode **nodesStack = zmalloc(zat->length * sizeof(*nodesStack));
+    int idxStack = 0;
+    zavltreeNode *current = zat->root;
+
+    while (idxStack >= 0) {
+        if (current != NULL) {
+            nodesStack[idxStack++] = current;
+            current = current->lChild;
+        } else {
+            if (idxStack > 0) {
+                current = nodesStack[--idxStack];
+                zatFreeNode(current);
+                current = current->rChild;
+            } else {
+                break;
+            }
+        }
+    }
+    zfree(nodesStack);
+    zfree(zat);
+}
+
 void zatFreeNode(zavltreeNode *node) {
     sdsfree(node->ele);
     zfree(node);

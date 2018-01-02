@@ -1598,7 +1598,8 @@ typedef struct {
 zavltree *zatCreate(void);
 zskiplist *zslCreate(void);
 void zslFree(zskiplist *zsl);
-void zatFree(zskiplist *zsl);
+void zatFree(zavltree *zat);
+void zatFreeNode(zavltreeNode *node);
 zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele);
 zavltreeNode *zatInsert(zavltree *zat, double score, sds ele);
 unsigned char *zzlInsert(unsigned char *zl, sds ele, double score);

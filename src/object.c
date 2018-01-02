@@ -293,6 +293,12 @@ void freeZsetObject(robj *o) {
         zslFree(zs->zsl);
         zfree(zs);
         break;
+    case OBJ_ENCODING_AVLTREE:
+        zs = o->ptr;
+        dictRelease(zs->dict);
+        zatFree(zs->avl);
+        zfree(zs);
+        break;
     case OBJ_ENCODING_ZIPLIST:
         zfree(o->ptr);
         break;
