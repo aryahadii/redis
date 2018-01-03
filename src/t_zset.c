@@ -809,6 +809,7 @@ zavltreeNode *avltreeRecursiveDelete(zset *zs, zavltreeNode **node,
                 (*node) = successor;
             }
             (*deleted)++;
+            zs->avl->length--;
         } else {
             zavltreeNode *minValueNode = findMinValueNode((*node)->rChild);
             dictDelete(zs->dict, minValueNode->ele);
@@ -887,13 +888,20 @@ void zatGetElementsInRange(zavltree *avl, unsigned long startRank,
 
     while (idxStack >= 0) {
         if (current != NULL) {
+            if (current->lChild != NULL && current->rChild != NULL) {
+            } else if (current->lChild != NULL && current->rChild == NULL) {
+            } else if (current->rChild != NULL) {
+            } else {
+            }
             nodesStack[idxStack++] = current;
             current = current->lChild;
         } else {
             if (idxStack > 0) {
                 current = nodesStack[--idxStack];
 
-                if (++traversed >= startRank) (*nodes)[idxNodes++] = current;
+                if (++traversed >= startRank) {
+                    (*nodes)[idxNodes++] = current;
+                }
                 if (traversed == endRank) {
                     zfree(nodesStack);
                     return;
@@ -2833,6 +2841,10 @@ void zrangeGenericCommand(client *c, int reverse) {
         sds ele;
         int idx = 0;
         while(idx < rangelen) {
+            if (nodes[idx] == NULL) {
+                if (nodes[idx+1] == NULL) {
+                }
+            }
             ele = nodes[idx]->ele;
             addReplyBulkCBuffer(c, ele, sdslen(ele));
             if (withscores)
