@@ -60,6 +60,22 @@
 #include "server.h"
 #include <math.h>
 
+int double_equals(double a, double b)
+{
+    if (a > b) {
+        return (a - b < 0.000000001);
+    }
+    return (b - a < 0.000000001);
+}
+
+int lessThan(sds ele1, double score1, sds ele2, double score2) {
+    return (score1 < score2 || (double_equals(score1, score2) && sdscmp(ele1, ele2) < 0));
+}
+
+int equals(sds ele1, double score1, sds ele2, double score2) {
+    return (double_equals(score1, score2) && sdscmp(ele1, ele2) == 0);
+}
+
 /*-----------------------------------------------------------------------------
  * Skiplist implementation of the low level API
  *----------------------------------------------------------------------------*/
@@ -754,11 +770,10 @@ zavltreeNode *zatInsert(zavltree *zat, double score, sds ele) {
     for (int i = parentsCount - 1; i > 0; i--) {
         zatUpdateNodeHeight(parents[i]);
         
-        zavltreeNode *rebalanced = zatRebalance(parents[i]);
-        if (parents[i - 1]->lChild == parents[i]) {
-            parents[i - 1]->lChild = rebalanced;
-        } else if (parents[i - 1]->rChild == parents[i]) {
-            parents[i - 1]->rChild = rebalanced;
+        if (lessThan(parents[i]->ele, parents[i]->score, parents[i - 1]->ele, parents[i - 1]->score)) {
+            parents[i - 1]->lChild = zatRebalance(parents[i]);
+        } else {
+            parents[i - 1]->rChild = zatRebalance(parents[i]);
         }
     }
     zatUpdateNodeHeight(zat->root);
@@ -768,119 +783,69 @@ zavltreeNode *zatInsert(zavltree *zat, double score, sds ele) {
     return newNode;
 }
 
-int zatDelete(zavltree *zat, double score, sds ele, zavltreeNode **node) {
-    if (zat->length == 0) {
-        return 0; /* not found */
-    }
-    
-    zavltreeNode *trashNode = zmalloc(sizeof(zavltreeNode));
-    int maxLevels = zat->length / 2 + 1;
-    int parentsCount = 0;
-    zavltreeNode **parents = zmalloc(maxLevels * sizeof(*parents));
-    zavltreeNode *current = zat->root;
-    
-    int eleComp = 0;
-    do {
-        parents[parentsCount++] = current;
-        eleComp = sdscmp(ele, current->ele);
-        if (score < current->score || (score == current->score && eleComp < 0)) {
-            current = current->lChild;
-        } else if (score > current->score || (score == current->score && eleComp > 0)) {
-            current = current->rChild;
-        }
-    } while (current != NULL && eleComp != 0);
-    
-    if (current == NULL) {
-        zfree(parents);
-        return 0; /* not found */ 
-    }
-    
-    if (current->lChild == NULL || current->rChild == NULL) {
-        zavltreeNode *successor = current->lChild;
-        if (!successor) successor = current->rChild;
-        
-        if (!successor) {
-            if (parentsCount > 1) {
-                trashNode = current;
-                if (parents[parentsCount - 2]->lChild == current) {
-                    parents[parentsCount - 2]->lChild = NULL;
-                } else {
-                    parents[parentsCount - 2]->rChild = NULL;
-                }
-            } else {
-                trashNode = zat->root;
-                zat->root = NULL;
-            }
-        } else {
-            if (parentsCount > 1) {
-                trashNode = current;
-                if (parents[parentsCount - 2]->lChild == current) {
-                    parents[parentsCount - 2]->lChild = successor;
-                } else {
-                    parents[parentsCount - 2]->rChild = successor;
-                }
-            } else {
-                trashNode = zat->root;
-                zat->root = successor;
-            }
-        }
-    } else {
-        zavltreeNode *minValueParentNode = findMinValueParent(current->rChild);
-        if (!minValueParentNode) {
-            // trashNode = zat->root;
-            // zat->root = NULL;
-            trashNode = current->rChild;
-            /* Change current value to it's successor */
-            current->ele = sdsdup(current->rChild->ele);
-            current->score = current->rChild->score;
-            current->rChild = current->rChild->rChild;
-        } else {
-            trashNode = zatCreateNode(current->score, current->ele);
-            /* Change current value to it's successor */
-            current->ele = sdsdup(minValueParentNode->lChild->ele);
-            current->score = minValueParentNode->lChild->score;
-            
-            /* Remove successor Node */
-            zatFreeNode(minValueParentNode->lChild);
-            minValueParentNode->lChild = NULL;
-        }
-    }
-    zat->length--;
+zavltreeNode *avltreeRecursiveDelete(zset *zs, zavltreeNode **node,
+        double score, sds ele, sds *outEle, int *deleted) {
 
-    /* Rebalance tree and update heights */
-    for (int i = parentsCount - 1; i > 0; i--) {
-        zatUpdateNodeHeight(parents[i]);
-        
-        zavltreeNode *rebalanced = zatRebalance(parents[i]);
-        if (parents[i - 1]->lChild == parents[i]) {
-            parents[i - 1]->lChild = rebalanced;
-        } else if (parents[i - 1]->rChild == parents[i]) {
-            parents[i - 1]->rChild = rebalanced;
-        }
-    }
-    zatUpdateNodeHeight(zat->root);
-    zat->root = zatRebalance(zat->root);
-
-    zfree(parents);
     if (node == NULL) {
-        zatFreeNode(trashNode);
+        return NULL;
+    } else if (lessThan(ele, score, (*node)->ele, (*node)->score)) {
+        (*node)->lChild = avltreeRecursiveDelete(zs, &(*node)->lChild, score, ele,
+            outEle, deleted);
+    } else if (lessThan((*node)->ele, (*node)->score, ele, score)) {
+        (*node)->rChild = avltreeRecursiveDelete(zs, &(*node)->rChild, score, ele,
+            outEle, deleted);
     } else {
-        *node = trashNode;
-    }
-    return 1;
-}
+        sds trashEle = NULL;
+        if ((*node)->lChild == NULL || (*node)->rChild == NULL) {
+            zavltreeNode *successor = (*node)->lChild;
+            if (!successor) successor = (*node)->rChild;
+            
+            trashEle = (*node)->ele;
+            (*node)->ele = NULL;
+            zatFreeNode((*node));
+            if (!successor) {
+                (*node) = NULL;
+            } else {
+                (*node) = successor;
+            }
+            (*deleted)++;
+        } else {
+            zavltreeNode *minValueNode = findMinValueNode((*node)->rChild);
+            dictDelete(zs->dict, minValueNode->ele);
+            (*node)->score = minValueNode->score;
+            (*node)->rChild = avltreeRecursiveDelete(zs, &(*node)->rChild,
+                minValueNode->score, minValueNode->ele, &(*node)->ele, deleted);
+            dictAdd(zs->dict, (*node)->ele, &(*node)->score);
+        }
 
-zavltreeNode *findMinValueParent(zavltreeNode *root) {
-    if (!root->lChild) {
+        if (outEle != NULL) {
+            *outEle = trashEle;
+        } else {
+            sdsfree(trashEle);
+        }
+    }
+    
+    if ((*node) == NULL) {
         return NULL;
     }
+    
+    zatUpdateNodeHeight((*node));
+    return zatRebalance((*node));
+}
 
-    zavltreeNode *currentParent = root, *current = root->lChild;
-    while (!current->lChild) {
-        currentParent = current;
+int zatDelete(zset *zs, double score, sds ele, sds *deletedEle) {
+    int deleted = 0;
+    zs->avl->root = avltreeRecursiveDelete(zs, &zs->avl->root, score, ele, deletedEle,
+         &deleted);
+    return deleted;
+}
+
+zavltreeNode *findMinValueNode(zavltreeNode *root) {
+    zavltreeNode *current = root;
+    while (current->lChild) {
         current = current->lChild;
     }
-    return currentParent;
+    return current;
 }
 
 /* Finds an element by its rank. The rank argument needs to be 1-based. */
@@ -1721,13 +1686,15 @@ int zsetAdd(robj *zobj, double score, sds ele, int *flags, double *newscore) {
                     * update the score. */
                     dictGetVal(de) = &newNode->score; /* Update score ptr. */
                 } else {
-                    zavltreeNode *newNode, *tmpNode;
-                    serverAssert(zatDelete(zs->avl, curscore, ele, &tmpNode));
-                    newNode = zatInsert(zs->avl, score, tmpNode->ele);
+                    zavltreeNode *newNode;
+                    sds tmpEle;
+                    serverAssert(zatDelete(zs, curscore, ele, &tmpEle));
+                    newNode = zatInsert(zs->avl, score, tmpEle);
+                    serverAssert(!sdscmp(tmpEle, ele));
                     /* We reused the node->ele SDS string, free the node now
                     * since zslInsert created a new one. */
-                    tmpNode->ele = NULL;
-                    zatFreeNode(tmpNode);
+                    // tmpNode->ele = NULL;
+                    // zatFreeNode(tmpNode);
                     /* Note that we did not removed the original element from
                     * the hash table representing the sorted set, so we just
                     * update the score. */
@@ -1789,7 +1756,7 @@ int zsetDel(robj *zobj, sds ele) {
             /* Delete from sset. */
             int retval;
             if (zobj->encoding == OBJ_ENCODING_AVLTREE) {
-                retval = zatDelete(zs->avl,score,ele,NULL);
+                retval = zatDelete(zs,score,ele,NULL);
             } else {
                 retval = zslDelete(zs->zsl,score,ele,NULL);
             }
