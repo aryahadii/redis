@@ -60,6 +60,10 @@
 #include "server.h"
 #include <math.h>
 
+/*-----------------------------------------------------------------------------
+ * Helper functions
+ *----------------------------------------------------------------------------*/
+
 int double_equals(double a, double b)
 {
     if (a > b) {
@@ -682,6 +686,7 @@ zskiplistNode *zslLastInLexRange(zskiplist *zsl, zlexrangespec *range) {
  * AVL tree backend sorted set API
  *----------------------------------------------------------------------------*/
 
+/* Create a new AVL tree node. */
 zavltreeNode *zatCreateNode(double score, sds ele) {
     zavltreeNode *zn = zmalloc(sizeof(*zn));
     zn->score = score;
@@ -701,6 +706,7 @@ zavltree *zatCreate(void) {
     return zat;
 }
 
+/* Free memory that used by AVL tree. */
 void zatFree(zavltree *zat) {
     zavltreeNode **nodesStack = zmalloc(zat->length * sizeof(*nodesStack));
     int idxStack = 0;
@@ -724,6 +730,7 @@ void zatFree(zavltree *zat) {
     zfree(zat);
 }
 
+/* Free memory that used by AVL tree node. */
 void zatFreeNode(zavltreeNode *node) {
     sdsfree(node->ele);
     zfree(node);
@@ -731,21 +738,25 @@ void zatFreeNode(zavltreeNode *node) {
     node = NULL;
 }
 
+/* Insert new element into AVL tree (non-recursive).
+ * Ownership of SDS element belongs to tree */
 zavltreeNode *zatInsert(zavltree *zat, double score, sds ele) {
     serverAssert(!isnan(score));
     
+    /* Handle first element. */
     if (zat->root == NULL) {
         zat->root = zatCreateNode(score, ele);
         zat->length++;
         return zat->root;
     }
 
-    int maxLevels = zat->length / 2 + 1;
     int parentsCount = 0;
-    zavltreeNode **parents = zmalloc(maxLevels * sizeof(*parents));
+    int maxLevels = zat->length / 2 + 1;
     zavltreeNode *current = zat->root;
     zavltreeNode *newNode = zatCreateNode(score, ele);
+    zavltreeNode **parents = zmalloc(maxLevels * sizeof(*parents));
     
+    /* Find new element's location. */
     int eleComp = 0;
     while (current != NULL) {
         parents[parentsCount++] = current;
@@ -758,6 +769,7 @@ zavltreeNode *zatInsert(zavltree *zat, double score, sds ele) {
     }
     current = parents[parentsCount - 1];
     
+    /* Insert new element to it's location. */
     if (score > current->score || 
             (score == current->score && sdscmp(current->ele, ele) < 0)) {
         current->rChild = newNode;
@@ -783,9 +795,15 @@ zavltreeNode *zatInsert(zavltree *zat, double score, sds ele) {
     return newNode;
 }
 
+/* Internal delete function used by zatDelete to delete element recursively.
+
+ * If 'outEle' is NULL, the deleted SDS element will be freed up, otherwise
+ * it will not freed and 'outEle' will set to SDS pointer.
+ * 
+ * 'deleted' have to set to an int pointer. it's value will be non-zero if 
+ * deletion occured. */
 zavltreeNode *avltreeRecursiveDelete(zset *zs, zavltreeNode **node,
         double score, sds ele, sds *outEle, int *deleted) {
-
     if (node == NULL) {
         return NULL;
     } else if (lessThan(ele, score, (*node)->ele, (*node)->score)) {
@@ -796,14 +814,21 @@ zavltreeNode *avltreeRecursiveDelete(zset *zs, zavltreeNode **node,
             outEle, deleted);
     } else {
         sds trashEle = NULL;
+
         if ((*node)->lChild == NULL || (*node)->rChild == NULL) {
+            /* If at least one of children are NULL. */
+            /* Find successor of node. */
             zavltreeNode *successor = (*node)->lChild;
             if (!successor) successor = (*node)->rChild;
             
             trashEle = (*node)->ele;
+            /* Set node's element to NULL, So it'll not freed up after calling
+             * zatFreeNode().  */
             (*node)->ele = NULL;
             zatFreeNode((*node));
+
             if (!successor) {
+                /* No successor */
                 (*node) = NULL;
             } else {
                 (*node) = successor;
@@ -811,7 +836,11 @@ zavltreeNode *avltreeRecursiveDelete(zset *zs, zavltreeNode **node,
             (*deleted)++;
             zs->avl->length--;
         } else {
+            /* If both of children exist. */
+            /* Find node's successor in it's rightside subtree */
             zavltreeNode *minValueNode = findMinValueNode((*node)->rChild);
+            /* Dictionary contains pointer to 'score', We have to delete it's
+             * old pointer and set it to new one. */
             dictDelete(zs->dict, minValueNode->ele);
             (*node)->score = minValueNode->score;
             (*node)->rChild = avltreeRecursiveDelete(zs, &(*node)->rChild,
@@ -819,6 +848,7 @@ zavltreeNode *avltreeRecursiveDelete(zset *zs, zavltreeNode **node,
             dictAdd(zs->dict, (*node)->ele, &(*node)->score);
         }
 
+        /* Free SDS if 'outEle' is NULL. */
         if (outEle != NULL) {
             *outEle = trashEle;
         } else {
@@ -826,6 +856,7 @@ zavltreeNode *avltreeRecursiveDelete(zset *zs, zavltreeNode **node,
         }
     }
     
+    /* Return if deletion occured in tree's leaf. */
     if ((*node) == NULL) {
         return NULL;
     }
@@ -834,6 +865,7 @@ zavltreeNode *avltreeRecursiveDelete(zset *zs, zavltreeNode **node,
     return zatRebalance((*node));
 }
 
+/* Delete element using avltreeRecursiveDelete(). */
 int zatDelete(zset *zs, double score, sds ele, sds *deletedEle) {
     int deleted = 0;
     zs->avl->root = avltreeRecursiveDelete(zs, &zs->avl->root, score, ele, deletedEle,
@@ -841,6 +873,7 @@ int zatDelete(zset *zs, double score, sds ele, sds *deletedEle) {
     return deleted;
 }
 
+/* Find minimum element in tree. */
 zavltreeNode *findMinValueNode(zavltreeNode *root) {
     zavltreeNode *current = root;
     while (current->lChild) {
@@ -916,6 +949,7 @@ void zatGetElementsInRange(zavltree *avl, unsigned long startRank,
     zfree(nodesStack);
 }
 
+/* Get rank of element in tree. */
 unsigned long zatGetRank(zavltree *avl, double score, sds ele) {
     zavltreeNode **nodesStack = zmalloc(avl->length * sizeof(*nodesStack));
     zavltreeNode *current = avl->root;
@@ -943,10 +977,13 @@ unsigned long zatGetRank(zavltree *avl, double score, sds ele) {
     return rank;
 }
 
+/* A helper function that returns height of node.
+ * It'll returns '0' if 'node' is NULL.  */
 unsigned int zatGetNodeHeight(zavltreeNode *node) {
     return (node == NULL ? 0 : node->height);
 }
 
+/* Update height of node by height of it's children. */
 void zatUpdateNodeHeight(zavltreeNode *node) {
     if (node == NULL) {
         return;
@@ -956,6 +993,7 @@ void zatUpdateNodeHeight(zavltreeNode *node) {
     node->height = 1 + (rightHeight > leftHeight ? rightHeight : leftHeight);
 }
 
+/* A helper function that returns balance factor of node. */
 int zatHeightDiff(zavltreeNode *node) {
     return (int)(zatGetNodeHeight(node->lChild) -
         zatGetNodeHeight(node->rChild));
