@@ -1,3 +1,4 @@
+#include <stdio.h>
 /*
  * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
  * Copyright (c) 2009-2012, Pieter Noordhuis <pcnoordhuis at gmail dot com>
@@ -58,6 +59,26 @@
 
 #include "server.h"
 #include <math.h>
+
+/*-----------------------------------------------------------------------------
+ * Helper functions
+ *----------------------------------------------------------------------------*/
+
+int double_equals(double a, double b)
+{
+    if (a > b) {
+        return (a - b < 0.000000001);
+    }
+    return (b - a < 0.000000001);
+}
+
+int lessThan(sds ele1, double score1, sds ele2, double score2) {
+    return (score1 < score2 || (double_equals(score1, score2) && sdscmp(ele1, ele2) < 0));
+}
+
+int equals(sds ele1, double score1, sds ele2, double score2) {
+    return (double_equals(score1, score2) && sdscmp(ele1, ele2) == 0);
+}
 
 /*-----------------------------------------------------------------------------
  * Skiplist implementation of the low level API
@@ -662,6 +683,361 @@ zskiplistNode *zslLastInLexRange(zskiplist *zsl, zlexrangespec *range) {
 }
 
 /*-----------------------------------------------------------------------------
+ * AVL tree backend sorted set API
+ *----------------------------------------------------------------------------*/
+
+/* Create a new AVL tree node. */
+zavltreeNode *zatCreateNode(double score, sds ele) {
+    zavltreeNode *zn = zmalloc(sizeof(*zn));
+    zn->score = score;
+    zn->ele = ele;
+    zn->height = 1;
+    zn->lChild = NULL;
+    zn->rChild = NULL;
+    return zn;
+}
+
+/* Create a new AVL tree. */
+zavltree *zatCreate(void) {
+    zavltree *zat;
+    zat = zmalloc(sizeof(zavltree));
+    zat->root = NULL;
+    zat->length = 0;
+    return zat;
+}
+
+/* Free memory that used by AVL tree. */
+void zatFree(zavltree *zat) {
+    zavltreeNode **nodesStack = zmalloc(zat->length * sizeof(*nodesStack));
+    int idxStack = 0;
+    zavltreeNode *current = zat->root;
+
+    while (idxStack >= 0) {
+        if (current != NULL) {
+            nodesStack[idxStack++] = current;
+            current = current->lChild;
+        } else {
+            if (idxStack > 0) {
+                current = nodesStack[--idxStack];
+                zatFreeNode(current);
+                current = current->rChild;
+            } else {
+                break;
+            }
+        }
+    }
+    zfree(nodesStack);
+    zfree(zat);
+}
+
+/* Free memory that used by AVL tree node. */
+void zatFreeNode(zavltreeNode *node) {
+    sdsfree(node->ele);
+    zfree(node);
+    node->ele = NULL;
+    node = NULL;
+}
+
+/* Insert new element into AVL tree (non-recursive).
+ * Ownership of SDS element belongs to tree */
+zavltreeNode *zatInsert(zavltree *zat, double score, sds ele) {
+    serverAssert(!isnan(score));
+    
+    /* Handle first element. */
+    if (zat->root == NULL) {
+        zat->root = zatCreateNode(score, ele);
+        zat->length++;
+        return zat->root;
+    }
+
+    int parentsCount = 0;
+    int maxLevels = zat->length / 2 + 1;
+    zavltreeNode *current = zat->root;
+    zavltreeNode *newNode = zatCreateNode(score, ele);
+    zavltreeNode **parents = zmalloc(maxLevels * sizeof(*parents));
+    
+    /* Find new element's location. */
+    int eleComp = 0;
+    while (current != NULL) {
+        parents[parentsCount++] = current;
+        eleComp = sdscmp(current->ele, ele);
+        if (score > current->score || (score == current->score && eleComp < 0)) {
+            current = current->rChild;
+        } else if (score < current->score || (score == current->score && eleComp > 0)) {
+            current = current->lChild;
+        }
+    }
+    current = parents[parentsCount - 1];
+    
+    /* Insert new element to it's location. */
+    if (score > current->score || 
+            (score == current->score && sdscmp(current->ele, ele) < 0)) {
+        current->rChild = newNode;
+    } else {
+        current->lChild = newNode;
+    }
+    zat->length++;
+
+    /* Rebalance tree and update heights */
+    for (int i = parentsCount - 1; i > 0; i--) {
+        zatUpdateNodeHeight(parents[i]);
+        
+        if (lessThan(parents[i]->ele, parents[i]->score, parents[i - 1]->ele, parents[i - 1]->score)) {
+            parents[i - 1]->lChild = zatRebalance(parents[i]);
+        } else {
+            parents[i - 1]->rChild = zatRebalance(parents[i]);
+        }
+    }
+    zatUpdateNodeHeight(zat->root);
+    zat->root = zatRebalance(zat->root);
+
+    zfree(parents);
+    return newNode;
+}
+
+/* Internal delete function used by zatDelete to delete element recursively.
+
+ * If 'outEle' is NULL, the deleted SDS element will be freed up, otherwise
+ * it will not freed and 'outEle' will set to SDS pointer.
+ * 
+ * 'deleted' have to set to an int pointer. it's value will be non-zero if 
+ * deletion occured. */
+zavltreeNode *avltreeRecursiveDelete(zset *zs, zavltreeNode **node,
+        double score, sds ele, sds *outEle, int *deleted) {
+    if (node == NULL) {
+        return NULL;
+    } else if (lessThan(ele, score, (*node)->ele, (*node)->score)) {
+        (*node)->lChild = avltreeRecursiveDelete(zs, &(*node)->lChild, score, ele,
+            outEle, deleted);
+    } else if (lessThan((*node)->ele, (*node)->score, ele, score)) {
+        (*node)->rChild = avltreeRecursiveDelete(zs, &(*node)->rChild, score, ele,
+            outEle, deleted);
+    } else {
+        sds trashEle = NULL;
+
+        if ((*node)->lChild == NULL || (*node)->rChild == NULL) {
+            /* If at least one of children are NULL. */
+            /* Find successor of node. */
+            zavltreeNode *successor = (*node)->lChild;
+            if (!successor) successor = (*node)->rChild;
+            
+            trashEle = (*node)->ele;
+            /* Set node's element to NULL, So it'll not freed up after calling
+             * zatFreeNode().  */
+            (*node)->ele = NULL;
+            zatFreeNode((*node));
+
+            if (!successor) {
+                /* No successor */
+                (*node) = NULL;
+            } else {
+                (*node) = successor;
+            }
+            (*deleted)++;
+            zs->avl->length--;
+        } else {
+            /* If both of children exist. */
+            /* Find node's successor in it's rightside subtree */
+            zavltreeNode *minValueNode = findMinValueNode((*node)->rChild);
+            /* Dictionary contains pointer to 'score', We have to delete it's
+             * old pointer and set it to new one. */
+            dictDelete(zs->dict, minValueNode->ele);
+            (*node)->score = minValueNode->score;
+            (*node)->rChild = avltreeRecursiveDelete(zs, &(*node)->rChild,
+                minValueNode->score, minValueNode->ele, &(*node)->ele, deleted);
+            dictAdd(zs->dict, (*node)->ele, &(*node)->score);
+        }
+
+        /* Free SDS if 'outEle' is NULL. */
+        if (outEle != NULL) {
+            *outEle = trashEle;
+        } else {
+            sdsfree(trashEle);
+        }
+    }
+    
+    /* Return if deletion occured in tree's leaf. */
+    if ((*node) == NULL) {
+        return NULL;
+    }
+    
+    zatUpdateNodeHeight((*node));
+    return zatRebalance((*node));
+}
+
+/* Delete element using avltreeRecursiveDelete(). */
+int zatDelete(zset *zs, double score, sds ele, sds *deletedEle) {
+    int deleted = 0;
+    zs->avl->root = avltreeRecursiveDelete(zs, &zs->avl->root, score, ele, deletedEle,
+         &deleted);
+    return deleted;
+}
+
+/* Find minimum element in tree. */
+zavltreeNode *findMinValueNode(zavltreeNode *root) {
+    zavltreeNode *current = root;
+    while (current->lChild) {
+        current = current->lChild;
+    }
+    return current;
+}
+
+/* Finds an element by its rank. The rank argument needs to be 1-based. */
+zavltreeNode* zatGetElementByRank(zavltree *avl, unsigned long rank) {
+    zavltreeNode **nodesStack = zmalloc(avl->length * sizeof(zavltreeNode*));
+    int idx = 0;
+    zavltreeNode *current = avl->root;
+    unsigned long traversed = 1;
+
+    while (idx >= 0) {
+        if (current != NULL) {
+            nodesStack[idx++] = current;
+            current = current->lChild;
+        } else {
+            if (idx > 0) {
+                current = nodesStack[--idx];
+                if (traversed++ == rank) {
+                    zfree(nodesStack);
+                    return current;
+                }
+                current = current->rChild;
+            } else {
+                break;
+            }
+        }
+    }
+
+    zfree(nodesStack);
+    return NULL;
+}
+
+/* Finds elements in range. The rank argument needs to be 1-based. */
+void zatGetElementsInRange(zavltree *avl, unsigned long startRank,
+        unsigned long endRank, zavltreeNode ***nodes) {
+    zavltreeNode **nodesStack = zmalloc(avl->length * sizeof(*nodesStack));
+    int idxStack = 0, idxNodes = 0;
+    zavltreeNode *current = avl->root;
+    unsigned long traversed = 0;
+
+    while (idxStack >= 0) {
+        if (current != NULL) {
+            if (current->lChild != NULL && current->rChild != NULL) {
+            } else if (current->lChild != NULL && current->rChild == NULL) {
+            } else if (current->rChild != NULL) {
+            } else {
+            }
+            nodesStack[idxStack++] = current;
+            current = current->lChild;
+        } else {
+            if (idxStack > 0) {
+                current = nodesStack[--idxStack];
+
+                if (++traversed >= startRank) {
+                    (*nodes)[idxNodes++] = current;
+                }
+                if (traversed == endRank) {
+                    zfree(nodesStack);
+                    return;
+                }
+
+                current = current->rChild;
+            } else {
+                break;
+            }
+        }
+    }
+    zfree(nodesStack);
+}
+
+/* Get rank of element in tree. */
+unsigned long zatGetRank(zavltree *avl, double score, sds ele) {
+    zavltreeNode **nodesStack = zmalloc(avl->length * sizeof(*nodesStack));
+    zavltreeNode *current = avl->root;
+    unsigned long rank = 0;
+    int idxStack = 0;
+
+    while (idxStack >= 0) {
+        if (current != NULL) {
+            nodesStack[idxStack++] = current;
+            current = current->lChild;
+        } else {
+            if (idxStack > 0) {
+                current = nodesStack[--idxStack];
+                rank++;
+                if (current->score == score && sdscmp(ele, current->ele) == 0) {
+                    break;
+                }
+                current = current->rChild;
+            } else {
+                break;
+            }
+        }
+    }
+    zfree(nodesStack);
+    return rank;
+}
+
+/* A helper function that returns height of node.
+ * It'll returns '0' if 'node' is NULL.  */
+unsigned int zatGetNodeHeight(zavltreeNode *node) {
+    return (node == NULL ? 0 : node->height);
+}
+
+/* Update height of node by height of it's children. */
+void zatUpdateNodeHeight(zavltreeNode *node) {
+    if (node == NULL) {
+        return;
+    }
+    unsigned int leftHeight = zatGetNodeHeight(node->lChild);
+    unsigned int rightHeight = zatGetNodeHeight(node->rChild);
+    node->height = 1 + (rightHeight > leftHeight ? rightHeight : leftHeight);
+}
+
+/* A helper function that returns balance factor of node. */
+int zatHeightDiff(zavltreeNode *node) {
+    return (int)(zatGetNodeHeight(node->lChild) -
+        zatGetNodeHeight(node->rChild));
+}
+
+zavltreeNode *zatRightRotate(zavltreeNode *node) {
+    zavltreeNode *newRoot = node->lChild;
+    node->lChild = node->lChild->rChild;
+    newRoot->rChild = node;
+    zatUpdateNodeHeight(node);
+    zatUpdateNodeHeight(newRoot);
+    return newRoot;
+}
+
+zavltreeNode *zatLeftRotate(zavltreeNode *node) {
+    zavltreeNode *newRoot = node->rChild;
+    node->rChild = node->rChild->lChild;
+    newRoot->lChild = node;
+    zatUpdateNodeHeight(node);
+    zatUpdateNodeHeight(newRoot);
+    return newRoot;
+}
+
+zavltreeNode *zatRebalance(zavltreeNode *node) {
+    if (node == NULL) {
+        return NULL;
+    }
+
+    int balanceFactor = zatHeightDiff(node);
+    if (balanceFactor > 1) {
+        if (zatHeightDiff(node->lChild) < 0) {
+            node->lChild = zatLeftRotate(node->lChild);
+        }
+        node = zatRightRotate(node);
+    } else if (balanceFactor < -1) {
+        if (zatHeightDiff(node->rChild) > 0) {
+            node->rChild = zatRightRotate(node->rChild);
+        }
+        node = zatLeftRotate(node);
+    }
+    return node;
+}
+
+/*-----------------------------------------------------------------------------
  * Ziplist-backed sorted set API
  *----------------------------------------------------------------------------*/
 
@@ -1106,6 +1482,8 @@ unsigned int zsetLength(const robj *zobj) {
         length = zzlLength(zobj->ptr);
     } else if (zobj->encoding == OBJ_ENCODING_SKIPLIST) {
         length = ((const zset*)zobj->ptr)->zsl->length;
+    } else if (zobj->encoding == OBJ_ENCODING_AVLTREE) {
+        length = ((const zset*)zobj->ptr)->avl->length;
     } else {
         serverPanic("Unknown sorted set encoding");
     }
@@ -1315,9 +1693,9 @@ int zsetAdd(robj *zobj, double score, sds ele, int *flags, double *newscore) {
             *flags |= ZADD_NOP;
             return 1;
         }
-    } else if (zobj->encoding == OBJ_ENCODING_SKIPLIST) {
+    } else if (zobj->encoding == OBJ_ENCODING_SKIPLIST ||
+                zobj->encoding == OBJ_ENCODING_AVLTREE) {
         zset *zs = zobj->ptr;
-        zskiplistNode *znode;
         dictEntry *de;
 
         de = dictFind(zs->dict,ele);
@@ -1341,24 +1719,45 @@ int zsetAdd(robj *zobj, double score, sds ele, int *flags, double *newscore) {
 
             /* Remove and re-insert when score changes. */
             if (score != curscore) {
-                zskiplistNode *node;
-                serverAssert(zslDelete(zs->zsl,curscore,ele,&node));
-                znode = zslInsert(zs->zsl,score,node->ele);
-                /* We reused the node->ele SDS string, free the node now
-                 * since zslInsert created a new one. */
-                node->ele = NULL;
-                zslFreeNode(node);
-                /* Note that we did not removed the original element from
-                 * the hash table representing the sorted set, so we just
-                 * update the score. */
-                dictGetVal(de) = &znode->score; /* Update score ptr. */
+                if (zobj->encoding == OBJ_ENCODING_SKIPLIST) {
+                    zskiplistNode *newNode, *tmpNode;
+                    serverAssert(zslDelete(zs->zsl,curscore,ele,&tmpNode));
+                    newNode = zslInsert(zs->zsl,score,tmpNode->ele);
+                    /* We reused the node->ele SDS string, free the node now
+                    * since zslInsert created a new one. */
+                    tmpNode->ele = NULL;
+                    zslFreeNode(tmpNode);
+                    /* Note that we did not removed the original element from
+                    * the hash table representing the sorted set, so we just
+                    * update the score. */
+                    dictGetVal(de) = &newNode->score; /* Update score ptr. */
+                } else {
+                    zavltreeNode *newNode;
+                    sds tmpEle;
+                    serverAssert(zatDelete(zs, curscore, ele, &tmpEle));
+                    newNode = zatInsert(zs->avl, score, tmpEle);
+                    serverAssert(!sdscmp(tmpEle, ele));
+                    /* We reused the node->ele SDS string, free the node now
+                    * since zslInsert created a new one. */
+                    // tmpNode->ele = NULL;
+                    // zatFreeNode(tmpNode);
+                    /* Note that we did not removed the original element from
+                    * the hash table representing the sorted set, so we just
+                    * update the score. */
+                    dictGetVal(de) = &newNode->score; /* Update score ptr. */
+                }
                 *flags |= ZADD_UPDATED;
             }
             return 1;
         } else if (!xx) {
             ele = sdsdup(ele);
-            znode = zslInsert(zs->zsl,score,ele);
-            serverAssert(dictAdd(zs->dict,ele,&znode->score) == DICT_OK);
+            if (zobj->encoding == OBJ_ENCODING_SKIPLIST) {
+                zskiplistNode *node = zslInsert(zs->zsl,score,ele);
+                serverAssert(dictAdd(zs->dict,ele,&node->score) == DICT_OK);
+            } else {
+                zavltreeNode *node = zatInsert(zs->avl,score,ele);
+                serverAssert(dictAdd(zs->dict,ele,&node->score) == DICT_OK);
+            }
             *flags |= ZADD_ADDED;
             if (newscore) *newscore = score;
             return 1;
@@ -1382,25 +1781,31 @@ int zsetDel(robj *zobj, sds ele) {
             zobj->ptr = zzlDelete(zobj->ptr,eptr);
             return 1;
         }
-    } else if (zobj->encoding == OBJ_ENCODING_SKIPLIST) {
+    } else if (zobj->encoding == OBJ_ENCODING_SKIPLIST || 
+            zobj->encoding == OBJ_ENCODING_AVLTREE) {
         zset *zs = zobj->ptr;
         dictEntry *de;
         double score;
 
         de = dictUnlink(zs->dict,ele);
         if (de != NULL) {
-            /* Get the score in order to delete from the skiplist later. */
+            /* Get the score in order to delete from the sset later. */
             score = *(double*)dictGetVal(de);
 
-            /* Delete from the hash table and later from the skiplist.
-             * Note that the order is important: deleting from the skiplist
+            /* Delete from the hash table and later from the sset.
+             * Note that the order is important: deleting from the sset
              * actually releases the SDS string representing the element,
-             * which is shared between the skiplist and the hash table, so
-             * we need to delete from the skiplist as the final step. */
+             * which is shared between the sset and the hash table, so
+             * we need to delete from the sset as the final step. */
             dictFreeUnlinkedEntry(zs->dict,de);
 
-            /* Delete from skiplist. */
-            int retval = zslDelete(zs->zsl,score,ele,NULL);
+            /* Delete from sset. */
+            int retval;
+            if (zobj->encoding == OBJ_ENCODING_AVLTREE) {
+                retval = zatDelete(zs,score,ele,NULL);
+            } else {
+                retval = zslDelete(zs->zsl,score,ele,NULL);
+            }
             serverAssert(retval);
 
             if (htNeedsResize(zs->dict)) dictResize(zs->dict);
@@ -1454,16 +1859,20 @@ long zsetRank(robj *zobj, sds ele, int reverse) {
         } else {
             return -1;
         }
-    } else if (zobj->encoding == OBJ_ENCODING_SKIPLIST) {
+    } else if (zobj->encoding == OBJ_ENCODING_SKIPLIST ||
+            zobj->encoding == OBJ_ENCODING_AVLTREE) {
         zset *zs = zobj->ptr;
-        zskiplist *zsl = zs->zsl;
         dictEntry *de;
         double score;
 
         de = dictFind(zs->dict,ele);
         if (de != NULL) {
             score = *(double*)dictGetVal(de);
-            rank = zslGetRank(zsl,score,ele);
+            if (zobj->encoding == OBJ_ENCODING_AVLTREE) {
+                rank = zatGetRank(zs->avl, score, ele);
+            } else {
+                rank = zslGetRank(zs->zsl, score, ele);
+            }
             /* Existing elements always have a rank. */
             serverAssert(rank != 0);
             if (reverse)
@@ -1508,12 +1917,14 @@ void zaddGenericCommand(client *c, int flags) {
         else if (!strcasecmp(opt,"xx")) flags |= ZADD_XX;
         else if (!strcasecmp(opt,"ch")) flags |= ZADD_CH;
         else if (!strcasecmp(opt,"incr")) flags |= ZADD_INCR;
+        else if (!strcasecmp(opt,"avl")) flags |= ZADD_AVL;
         else break;
         scoreidx++;
     }
 
     /* Turn options into simple to check vars. */
     int incr = (flags & ZADD_INCR) != 0;
+    int avl = (flags & ZADD_AVL) != 0;
     int nx = (flags & ZADD_NX) != 0;
     int xx = (flags & ZADD_XX) != 0;
     int ch = (flags & ZADD_CH) != 0;
@@ -1553,7 +1964,10 @@ void zaddGenericCommand(client *c, int flags) {
     zobj = lookupKeyWrite(c->db,key);
     if (zobj == NULL) {
         if (xx) goto reply_to_client; /* No key + XX option: nothing to do. */
-        if (server.zset_max_ziplist_entries == 0 ||
+        
+        if (avl) {
+            zobj = createZsetAVLObject();
+        } else if (server.zset_max_ziplist_entries == 0 ||
             server.zset_max_ziplist_value < sdslen(c->argv[scoreidx+1]->ptr))
         {
             zobj = createZsetObject();
@@ -1562,7 +1976,8 @@ void zaddGenericCommand(client *c, int flags) {
         }
         dbAdd(c->db,key,zobj);
     } else {
-        if (zobj->type != OBJ_ZSET) {
+        if (zobj->type != OBJ_ZSET || 
+            (zobj->encoding != OBJ_ENCODING_AVLTREE && avl)) {
             addReply(c,shared.wrongtypeerr);
             goto cleanup;
         }
@@ -1585,7 +2000,6 @@ void zaddGenericCommand(client *c, int flags) {
         score = newscore;
     }
     server.dirty += (added+updated);
-
 reply_to_client:
     if (incr) { /* ZINCRBY or INCR option. */
         if (processed)
@@ -2454,6 +2868,28 @@ void zrangeGenericCommand(client *c, int reverse) {
                 addReplyDouble(c,ln->score);
             ln = reverse ? ln->backward : ln->level[0].forward;
         }
+    } else if (zobj->encoding == OBJ_ENCODING_AVLTREE) {
+        serverAssertWithInfo(c, zobj, !reverse);
+
+        zset *zs = zobj->ptr;
+        zavltree *avl = zs->avl;
+        zavltreeNode **nodes = zmalloc(rangelen * sizeof(*nodes));
+        zatGetElementsInRange(avl, start + 1, end + 1, &nodes);
+
+        sds ele;
+        int idx = 0;
+        while(idx < rangelen) {
+            if (nodes[idx] == NULL) {
+                if (nodes[idx+1] == NULL) {
+                }
+            }
+            ele = nodes[idx]->ele;
+            addReplyBulkCBuffer(c, ele, sdslen(ele));
+            if (withscores)
+                addReplyDouble(c, nodes[idx]->score);
+            idx++;
+        }
+        zfree(nodes);
     } else {
         serverPanic("Unknown sorted set encoding");
     }

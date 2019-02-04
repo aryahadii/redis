@@ -614,6 +614,8 @@ int rdbSaveObjectType(rio *rdb, robj *o) {
             return rdbSaveType(rdb,RDB_TYPE_ZSET_ZIPLIST);
         else if (o->encoding == OBJ_ENCODING_SKIPLIST)
             return rdbSaveType(rdb,RDB_TYPE_ZSET_2);
+        else if (o->encoding == OBJ_ENCODING_AVLTREE)
+            return rdbSaveType(rdb,RDB_TYPE_ZSET_3);
         else
             serverPanic("Unknown sorted set encoding");
     case OBJ_HASH:
@@ -731,6 +733,26 @@ ssize_t rdbSaveObject(rio *rdb, robj *o) {
                     return -1;
                 nwritten += n;
                 zn = zn->backward;
+            }
+        } else if (o->encoding == OBJ_ENCODING_AVLTREE) {
+            zset *zs = o->ptr;
+            zavltree *avl = zs->avl;
+
+            if ((n = rdbSaveLen(rdb, avl->length)) == -1) return -1;
+            nwritten += n;
+
+            for (unsigned long rank = 1; rank <= avl->length; rank++) {
+                zavltreeNode *node = zatGetElementByRank(avl, rank);
+
+                if ((n = rdbSaveRawString(rdb,
+                    (unsigned char*)node->ele, sdslen(node->ele))) == -1)
+                {
+                    return -1;
+                }
+                nwritten += n;
+                if ((n = rdbSaveBinaryDoubleValue(rdb, node->score)) == -1)
+                    return -1;
+                nwritten += n;
             }
         } else {
             serverPanic("Unknown sorted set encoding");
@@ -1262,26 +1284,30 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
                 sdsfree(sdsele);
             }
         }
-    } else if (rdbtype == RDB_TYPE_ZSET_2 || rdbtype == RDB_TYPE_ZSET) {
+    } else if (rdbtype == RDB_TYPE_ZSET_3 || rdbtype == RDB_TYPE_ZSET_2 ||
+             rdbtype == RDB_TYPE_ZSET) {
         /* Read list/set value. */
         uint64_t zsetlen;
         size_t maxelelen = 0;
         zset *zs;
 
         if ((zsetlen = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return NULL;
-        o = createZsetObject();
+        if (rdbtype == RDB_TYPE_ZSET_3) {
+            o = createZsetAVLObject();
+        } else {
+            o = createZsetObject();
+        }
         zs = o->ptr;
 
         /* Load every single element of the sorted set. */
         while(zsetlen--) {
             sds sdsele;
             double score;
-            zskiplistNode *znode;
 
             if ((sdsele = rdbGenericLoadStringObject(rdb,RDB_LOAD_SDS,NULL))
                 == NULL) return NULL;
 
-            if (rdbtype == RDB_TYPE_ZSET_2) {
+            if (rdbtype == RDB_TYPE_ZSET_2 || rdbtype == RDB_TYPE_ZSET_3) {
                 if (rdbLoadBinaryDoubleValue(rdb,&score) == -1) return NULL;
             } else {
                 if (rdbLoadDoubleValue(rdb,&score) == -1) return NULL;
@@ -1290,14 +1316,23 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
             /* Don't care about integer-encoded strings. */
             if (sdslen(sdsele) > maxelelen) maxelelen = sdslen(sdsele);
 
-            znode = zslInsert(zs->zsl,score,sdsele);
-            dictAdd(zs->dict,sdsele,&znode->score);
+            if (rdbtype == RDB_TYPE_ZSET_3) {
+                zavltreeNode *znode;
+                znode = zatInsert(zs->avl, score, sdsele);
+                dictAdd(zs->dict, sdsele, &znode->score);
+            } else {
+                zskiplistNode *znode;
+                znode = zslInsert(zs->zsl,score,sdsele);
+                dictAdd(zs->dict,sdsele,&znode->score);
+            }
         }
 
         /* Convert *after* loading, since sorted sets are not stored ordered. */
-        if (zsetLength(o) <= server.zset_max_ziplist_entries &&
-            maxelelen <= server.zset_max_ziplist_value)
-                zsetConvert(o,OBJ_ENCODING_ZIPLIST);
+        if (rdbtype != RDB_TYPE_ZSET_3) {
+            if (zsetLength(o) <= server.zset_max_ziplist_entries &&
+                maxelelen <= server.zset_max_ziplist_value)
+                    zsetConvert(o,OBJ_ENCODING_ZIPLIST);
+        }
     } else if (rdbtype == RDB_TYPE_HASH) {
         uint64_t len;
         int ret;

@@ -581,6 +581,7 @@ typedef struct RedisModuleDigest {
 #define OBJ_ENCODING_EMBSTR 8  /* Embedded sds string encoding */
 #define OBJ_ENCODING_QUICKLIST 9 /* Encoded as linked list of ziplists */
 #define OBJ_ENCODING_STREAM 10 /* Encoded as a radix tree of listpacks */
+#define OBJ_ENCODING_AVLTREE 11  /* Encoded as AVL BST */
 
 #define LRU_BITS 24
 #define LRU_CLOCK_MAX ((1<<LRU_BITS)-1) /* Max value of obj->lru */
@@ -784,9 +785,22 @@ typedef struct zskiplist {
     int level;
 } zskiplist;
 
+typedef struct zavltreeNode {
+    sds ele;
+    double score;
+    unsigned int height;
+    struct zavltreeNode *lChild, *rChild;
+} zavltreeNode;
+
+typedef struct zavltree {
+    unsigned long length;
+    struct zavltreeNode *root;
+} zavltree;
+
 typedef struct zset {
     dict *dict;
     zskiplist *zsl;
+    zavltree *avl;
 } zset;
 
 typedef struct clientBufferLimitsConfig {
@@ -1467,6 +1481,7 @@ robj *createZiplistObject(void);
 robj *createSetObject(void);
 robj *createIntsetObject(void);
 robj *createHashObject(void);
+robj *createZsetAVLObject(void);
 robj *createZsetObject(void);
 robj *createZsetZiplistObject(void);
 robj *createStreamObject(void);
@@ -1563,8 +1578,10 @@ void receiveChildInfo(void);
 #define ZADD_ADDED (1<<5)   /* The element was new and was added. */
 #define ZADD_UPDATED (1<<6) /* The element already existed, score updated. */
 
+#define ZADD_AVL (1<<7)     /* Use AVL tree as internal representation */
+
 /* Flags only used by the ZADD command but not by zsetAdd() API: */
-#define ZADD_CH (1<<16)      /* Return num of elements added or updated. */
+#define ZADD_CH (1<<16)     /* Return num of elements added or updated. */
 
 /* Struct to hold a inclusive/exclusive range spec by score comparison. */
 typedef struct {
@@ -1578,11 +1595,17 @@ typedef struct {
     int minex, maxex; /* are min or max exclusive? */
 } zlexrangespec;
 
+zavltree *zatCreate(void);
 zskiplist *zslCreate(void);
 void zslFree(zskiplist *zsl);
+void zatFree(zavltree *zat);
+void zatFreeNode(zavltreeNode *node);
 zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele);
+zavltreeNode *zatInsert(zavltree *zat, double score, sds ele);
 unsigned char *zzlInsert(unsigned char *zl, sds ele, double score);
 int zslDelete(zskiplist *zsl, double score, sds ele, zskiplistNode **node);
+int zatDelete(zset *zs, double score, sds ele, sds *deletedEle);
+zavltreeNode *findMinValueNode(zavltreeNode *root);
 zskiplistNode *zslFirstInRange(zskiplist *zsl, zrangespec *range);
 zskiplistNode *zslLastInRange(zskiplist *zsl, zrangespec *range);
 double zzlGetScore(unsigned char *sptr);
@@ -1595,6 +1618,7 @@ void zsetConvert(robj *zobj, int encoding);
 void zsetConvertToZiplistIfNeeded(robj *zobj, size_t maxelelen);
 int zsetScore(robj *zobj, sds member, double *score);
 unsigned long zslGetRank(zskiplist *zsl, double score, sds o);
+unsigned long zatGetRank(zavltree *avl, double score, sds ele);
 int zsetAdd(robj *zobj, double score, sds ele, int *flags, double *newscore);
 long zsetRank(robj *zobj, sds ele, int reverse);
 int zsetDel(robj *zobj, sds ele);
@@ -1611,6 +1635,13 @@ int zzlLexValueGteMin(unsigned char *p, zlexrangespec *spec);
 int zzlLexValueLteMax(unsigned char *p, zlexrangespec *spec);
 int zslLexValueGteMin(sds value, zlexrangespec *spec);
 int zslLexValueLteMax(sds value, zlexrangespec *spec);
+unsigned int zatGetNodeHeight(zavltreeNode *node);
+void zatUpdateNodeHeight(zavltreeNode *node);
+int zatHeightDiff(zavltreeNode *node);
+zavltreeNode *zatRightRotate(zavltreeNode *node);
+zavltreeNode *zatLeftRotate(zavltreeNode *node);
+zavltreeNode *zatRebalance(zavltreeNode *node);
+zavltreeNode* zatGetElementByRank(zavltree *avl, unsigned long rank);
 
 /* Core functions */
 int freeMemoryIfNeeded(void);
